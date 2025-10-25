@@ -13,7 +13,7 @@ import (
 	"sync"
 	"syscall/js"
 
-	"github.com/eliben/go-sentencepiece"
+	"github.com/SpringMT/go-sentencepiece"
 )
 
 //go:embed embed_data/tokenizer.model

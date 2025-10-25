@@ -8,9 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/eliben/go-sentencepiece/internal/model"
-	"github.com/eliben/go-sentencepiece/internal/prefixmatcher"
-	"github.com/eliben/go-sentencepiece/internal/priorityqueue"
+	"github.com/SpringMT/go-sentencepiece/internal/model"
+	"github.com/SpringMT/go-sentencepiece/internal/prefixmatcher"
+	"github.com/SpringMT/go-sentencepiece/internal/priorityqueue"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/eliben/go-sentencepiece"
+	"github.com/SpringMT/go-sentencepiece"
 )
 
 func ExampleProcessor_Encode() {
