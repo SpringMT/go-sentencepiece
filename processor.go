@@ -73,8 +73,9 @@ func NewProcessor(protoReader io.Reader) (*Processor, error) {
 	}
 
 	tspec := mp.GetTrainerSpec()
-	if tspec.GetModelType() != model.TrainerSpec_BPE {
-		return nil, fmt.Errorf("model type %s not supported", tspec.GetModelType())
+	modelType := tspec.GetModelType()
+	if modelType != model.TrainerSpec_BPE && modelType != model.TrainerSpec_UNIGRAM {
+		return nil, fmt.Errorf("model type %s not supported", modelType)
 	}
 
 	nspec := mp.GetNormalizerSpec()
@@ -150,6 +151,17 @@ func NewProcessor(protoReader io.Reader) (*Processor, error) {
 // Encode tokenizes the input text and returns a list of Tokens.
 func (proc *Processor) Encode(text string) []Token {
 	text = normalize(text)
+
+	// Choose the appropriate encoding algorithm based on model type
+	modelType := proc.model.GetTrainerSpec().GetModelType()
+	if modelType == model.TrainerSpec_UNIGRAM {
+		return proc.encodeUNIGRAM(text)
+	}
+	return proc.encodeBPE(text)
+}
+
+// encodeBPE tokenizes using the BPE algorithm.
+func (proc *Processor) encodeBPE(text string) []Token {
 
 	// We begin by having each symbol a single Unicode character (or a
 	// user-defined string), and will iteratively merge them into larger and
@@ -333,6 +345,172 @@ func (proc *Processor) Encode(text string) []Token {
 		} else {
 			tokens = append(tokens, Token{ID: id, Text: symbol})
 		}
+	}
+
+	return tokens
+}
+
+// encodeUNIGRAM tokenizes using the UNIGRAM algorithm (Viterbi decoding).
+//
+// The UNIGRAM algorithm uses dynamic programming to find the optimal tokenization
+// that maximizes the sum of token scores. This is implemented using the Viterbi
+// algorithm:
+// 1. For each position in the text, we try all possible tokens that can start there
+// 2. We compute the best score to reach each position
+// 3. We backtrack to find the optimal path
+//
+// User-defined symbols are always used as-is and cannot be split.
+// If byte_fallback is enabled, unknown tokens are decomposed into individual bytes.
+func (proc *Processor) encodeUNIGRAM(text string) []Token {
+	if len(text) == 0 {
+		return nil
+	}
+
+	// latticeNode represents a node in the lattice for Viterbi decoding.
+	type latticeNode struct {
+		score     float32 // cumulative score to reach this node
+		backPos   int     // byte position of previous node
+		tokenID   int     // token ID for the edge leading to this node
+		tokenText string  // text of the token
+	}
+
+	n := len(text)
+
+	// Initialize DP array. dp[i] represents the best way to tokenize text[0:i]
+	dp := make([]latticeNode, n+1)
+	for i := range dp {
+		dp[i].score = -1e10 // negative infinity
+		dp[i].backPos = -1
+	}
+	dp[0].score = 0 // base case
+
+	// Standard DP loop: for each position, try all possible tokens
+	for i := 0; i < n; i++ {
+		if dp[i].score < -1e9 {
+			// This position is unreachable, skip it
+			continue
+		}
+
+		// Try to match user-defined symbols first
+		slen, found := proc.symbolMatch(text[i:])
+
+		if found {
+			// This is a user-defined symbol, must use it as-is
+			symbol := text[i : i+slen]
+			tokenID := proc.symbolToID(symbol)
+			score := float32(0)
+			if tokenID != proc.unknownID {
+				piece := proc.model.GetPieces()[tokenID]
+				score = piece.GetScore()
+			}
+
+			newScore := dp[i].score + score
+			if newScore > dp[i+slen].score {
+				dp[i+slen].score = newScore
+				dp[i+slen].backPos = i
+				dp[i+slen].tokenID = tokenID
+				dp[i+slen].tokenText = symbol
+			}
+		}
+
+		// Try all possible tokens starting at byte position i
+		// Start with single rune and expand
+		maxLen := min(n-i, proc.maxPieceLength)
+
+		for length := 1; length <= maxLen; length++ {
+			if i+length > n {
+				break
+			}
+
+			substr := text[i : i+length]
+
+			// First check if this is a valid UTF-8 boundary
+			// Only consider substrings that end at a valid UTF-8 boundary
+			if !utf8.ValidString(substr) {
+				continue
+			}
+
+			// Look up this substring in the vocabulary
+			tokenID, found := proc.pieces[substr]
+			if !found {
+				tokenID, found = proc.reserved[substr]
+			}
+
+			if found {
+				piece := proc.model.GetPieces()[tokenID]
+				score := piece.GetScore()
+				newScore := dp[i].score + score
+
+				if newScore > dp[i+length].score {
+					dp[i+length].score = newScore
+					dp[i+length].backPos = i
+					dp[i+length].tokenID = tokenID
+					dp[i+length].tokenText = substr
+				}
+			}
+		}
+
+		// Also consider unknown token for single rune
+		_, rlen := utf8.DecodeRuneInString(text[i:])
+		if i+rlen <= n && rlen > 0 {
+			unkSymbol := text[i : i+rlen]
+			tokenID := proc.unknownID
+			piece := proc.model.GetPieces()[tokenID]
+			score := piece.GetScore()
+			newScore := dp[i].score + score
+
+			if newScore > dp[i+rlen].score {
+				dp[i+rlen].score = newScore
+				dp[i+rlen].backPos = i
+				dp[i+rlen].tokenID = tokenID
+				dp[i+rlen].tokenText = unkSymbol
+			}
+		}
+	}
+
+	// Check if we reached the end
+	if dp[n].backPos == -1 {
+		// Could not tokenize the entire text, fall back to character-by-character
+		var tokens []Token
+		for i := 0; i < n; {
+			_, rlen := utf8.DecodeRuneInString(text[i:])
+			if rlen <= 0 {
+				rlen = 1
+			}
+			symbol := text[i : i+rlen]
+			tokens = append(tokens, Token{ID: proc.unknownID, Text: symbol})
+			i += rlen
+		}
+		return tokens
+	}
+
+	// Backtrack to find the best path
+	var tokens []Token
+	for pos := n; pos > 0; {
+		node := dp[pos]
+		if node.backPos == -1 {
+			break
+		}
+
+		tokenID := node.tokenID
+		symbol := node.tokenText
+
+		// Handle byte fallback if necessary
+		if tokenID == proc.unknownID && proc.model.GetTrainerSpec().GetByteFallback() {
+			// Decompose this symbol into bytes
+			for i := len(symbol) - 1; i >= 0; i-- {
+				tokens = append(tokens, proc.byte2Token[symbol[i]])
+			}
+		} else {
+			tokens = append(tokens, Token{ID: tokenID, Text: symbol})
+		}
+
+		pos = node.backPos
+	}
+
+	// Reverse tokens since we built them backwards
+	for i, j := 0, len(tokens)-1; i < j; i, j = i+1, j-1 {
+		tokens[i], tokens[j] = tokens[j], tokens[i]
 	}
 
 	return tokens

@@ -20,8 +20,11 @@ by a protobuf configuration file. This repository currently focuses
 on implementing just the functionality required to reproduce the
 tokenization of [Gemma models](https://ai.google.dev/gemma) (the same
 tokenizer is used for Google's proprietary Gemini family of models).
-Specifically, it only implements BPE tokenization since this is what
-Gemma uses.
+
+This implementation supports both **BPE** (Byte Pair Encoding) and **UNIGRAM** 
+tokenization algorithms:
+- **BPE**: Uses an iterative merge algorithm to combine frequent pairs of tokens
+- **UNIGRAM**: Uses Viterbi decoding to find the optimal tokenization path
 
 ## Current status
 
