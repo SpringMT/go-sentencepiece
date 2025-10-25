@@ -1,4 +1,4 @@
-module github.com/eliben/go-sentencepiece
+module github.com/SpringMT/go-sentencepiece
 
 go 1.22.5
 
